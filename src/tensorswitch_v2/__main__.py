@@ -695,8 +695,9 @@ Supported output formats:
     # Batch processing mode
     # NOTE: Batch mode is auto-detected when input is a directory (no file extension)
     parser.add_argument(
-        "--pattern", default="*.tif",
-        help="File pattern for batch mode (default: *.tif)",
+        "--pattern", default=None,
+        help="File pattern for batch mode (default: *.tif; with --per_file_jobs, "
+             "every supported image file)",
     )
     parser.add_argument(
         "--recursive", action="store_true",
@@ -705,6 +706,13 @@ Supported output formats:
     parser.add_argument(
         "--max_concurrent", type=int, default=100,
         help="Max concurrent LSF jobs in batch mode (default: 100)",
+    )
+    parser.add_argument(
+        "--per_file_jobs", action="store_true",
+        help="In batch mode with --submit, submit each file through the full "
+             "single-file pipeline (per-file resource estimation, all conversion "
+             "options, --auto_multiscale pyramid) instead of one LSF job array. "
+             "Works with --sync to wait for every file.",
     )
     parser.add_argument(
         "--skip_existing", action="store_true", default=True,
@@ -1868,6 +1876,69 @@ def _submit_dependent_pyramid(args, conversion_job_id: str):
         return None
 
 
+def _submit_batch_per_file(args, batch, skip_existing: bool):
+    """Submit every discovered batch file through the single-file --submit path.
+
+    Unlike BatchConverter.submit_lsf() (one job array, a fixed subset of
+    options), each file gets its own resource estimate, the full option
+    passthrough of submit_job(), and a dependent pyramid coordinator when
+    --auto_multiscale is set. With --sync, blocks until every file's final
+    job (conversion, or pyramid coordinator) has ended.
+    """
+    import copy
+
+    if not args.project:
+        raise ValueError("--project is required with --submit")
+
+    files = batch._files
+    wait_job_ids = []
+    skipped = 0
+    failed = []
+
+    for n, file_info in enumerate(files, start=1):
+        name = os.path.basename(file_info.input_path)
+        print(f"\n[{n}/{len(files)}] {name}")
+        if skip_existing and batch._is_completed(file_info):
+            print("  SKIP: output exists")
+            skipped += 1
+            continue
+
+        file_args = copy.copy(args)
+        file_args.input = file_info.input_path
+        file_args.output = file_info.output_path
+        try:
+            os.makedirs(os.path.dirname(file_info.output_path), exist_ok=True)
+            job_id = submit_job(file_args, return_job_id=True)
+            wait_job_id = job_id
+            if file_args.auto_multiscale and job_id:
+                wait_job_id = _submit_dependent_pyramid(file_args, conversion_job_id=job_id) or job_id
+        except Exception as e:
+            print(f"  FAILED to submit {name}: {e}")
+            failed.append((name, str(e)))
+            continue
+        if wait_job_id:
+            wait_job_ids.append(wait_job_id)
+
+    print("\n" + "=" * 72)
+    print("Batch Per-File Submission Summary")
+    print("=" * 72)
+    print(f"  Total files:  {len(files)}")
+    print(f"  Submitted:    {len(files) - skipped - len(failed)}")
+    print(f"  Skipped:      {skipped} (already exist)")
+    print(f"  Failed:       {len(failed)}")
+    for name, reason in failed:
+        print(f"    - {name}: {reason}")
+    print("=" * 72)
+
+    if getattr(args, 'sync', False):
+        for job_id in wait_job_ids:
+            print(f"\nWaiting for job {job_id} to complete (--sync)...")
+            os.system(f"bwait -w 'ended({job_id})'")
+
+    if failed:
+        sys.exit(1)
+
+
 def _submit_upsample_job(args, verbose=True):
     """Submit an LSF bsub job for upsampling anisotropic → isotropic.
 
@@ -2268,6 +2339,12 @@ def main(argv=None):
     """Run single-process conversion, downsampling, or submit LSF job."""
     args = parse_args(argv)
 
+    # --pattern defaults to *.tif; --per_file_jobs without an explicit
+    # --pattern instead takes every supported image file (batch branch below).
+    pattern_given = args.pattern is not None
+    if not pattern_given:
+        args.pattern = "*.tif"
+
     # Apply preset configurations
     if args.preset == "webknossos":
         # WebKnossos preset: zarr3, chunk 32x32x32, shard 1024x1024x1024
@@ -2475,6 +2552,8 @@ def main(argv=None):
 
         if input_mode == 'batch_directory':
             # Batch mode: process multiple files
+            if args.per_file_jobs and not pattern_given:
+                args.pattern = "*"
             batch = BatchConverter(
                 input_dir=args.input,
                 output_dir=args.output,
@@ -2491,7 +2570,9 @@ def main(argv=None):
 
             print(f"Discovered {len(files)} files matching '{args.pattern}'")
 
-            if args.submit:
+            if args.submit and args.per_file_jobs:
+                _submit_batch_per_file(args, batch, skip_existing)
+            elif args.submit:
                 # Submit as LSF job array
                 if not args.project:
                     raise ValueError("--project is required with --submit")

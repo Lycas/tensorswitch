@@ -318,8 +318,9 @@ class BatchConverter:
         """Check if output file exists and is valid."""
         output_path = file_info.output_path
         # Check for zarr.json in level 0 subdirectory (indicates successful conversion)
-        # Support both "s0" (Janelia convention) and "0" (numeric) naming formats
-        for level_name in ["s0", "0"]:
+        # Support both "s0" (Janelia convention) and "0" (numeric) naming formats,
+        # flat or under the default OME-NGFF nested "raw/" image subgroup
+        for level_name in ["s0", "0", "raw/s0", "raw/0"]:
             marker_file = os.path.join(output_path, level_name, "zarr.json")
             if os.path.exists(marker_file):
                 return True

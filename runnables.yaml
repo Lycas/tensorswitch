@@ -10,25 +10,39 @@ runnables:
     type: job
     name: TensorSwitch
     description: >
-      Convert a microscopy file (TIFF, ND2, CZI, IMS, HDF5, Zarr, N5, and 200+ formats)
-      to Zarr3, Zarr2, or N5. Optionally generates a multi-scale pyramid and/or upsamples
-      to isotropic resolution.
+      Convert every microscopy image file in a directory (TIFF, ND2, CZI, IMS, HDF5)
+      to Zarr3, Zarr2, or N5. Each file is submitted as its own cluster job with its
+      own resource estimate, and written to <Output Directory>/<file name>.zarr.
+      Optionally generates a multi-scale pyramid and/or upsamples to isotropic resolution.
+      Files whose output already exists are skipped, so a re-run only picks up new or
+      failed files.
 
       Required fields are marked with a red asterisk. All other fields are optional —
       leave blank for auto-calculated defaults.
-    command: pixi run tensorswitch-v2 --submit --sync
+    command: pixi run tensorswitch-v2 --submit --sync --per_file_jobs
     parameters:
       - flag: -i
-        name: Input Path
-        type: file
-        description: "Path to input file (TIFF, ND2, CZI, IMS, HDF5, N5, Zarr, and 200+ formats). Format is auto-detected from extension."
+        name: Input Directory
+        type: directory
+        description: "Directory containing the image files to convert (TIFF, ND2, CZI, IMS, HDF5). Every supported file in it is converted; format is auto-detected per file from its extension."
         required: true
 
       - flag: -o
-        name: Output Path
+        name: Output Directory
         type: directory
-        description: "Output path for the converted dataset (e.g., /path/to/output.zarr). You can type a new path — TensorSwitch creates the directory automatically."
+        description: "Directory to write the converted datasets into (e.g., /path/to/output/). Each input file becomes <Output Directory>/<file name>.zarr. You can type a new path — TensorSwitch creates it automatically."
         required: true
+
+      - flag: --pattern
+        name: File Pattern
+        type: string
+        description: "Optional filename filter, e.g. *.czi or scan_*.tif. Leave blank to convert all supported image files in the directory."
+
+      - flag: --recursive
+        name: Include Subdirectories
+        type: boolean
+        description: "Also convert image files in subdirectories. The subdirectory layout is mirrored under the Output Directory."
+        default: false
 
       - flag: --project
         name: LSF Billing Project
@@ -162,12 +176,12 @@ runnables:
         description: >
           Customize pyramid generation for two use cases:
 
-          1. Conversion + pyramid (default): leave Input/Output as your source file and
-          output zarr. Pyramid is generated automatically after conversion
+          1. Conversion + pyramid (default): set Input/Output Directory as usual. A
+          pyramid is generated automatically for each file after its conversion
           (Generate Multi-Scale Pyramid is on by default).
 
-          2. Pyramid-only (existing zarr): set both Input Path and Output Path to your
-          existing zarr root (e.g. /path/to/output.zarr). TensorSwitch will
+          2. Pyramid-only (existing zarr): set both Input Directory and Output Directory
+          to one existing zarr root (e.g. /path/to/output.zarr). TensorSwitch will
           auto-detect s0 and skip conversion entirely.
         collapsed: true
         parameters:
@@ -250,7 +264,7 @@ runnables:
           - flag: --bbox
             name: Bounding Box
             type: string
-            description: "Extract a subvolume: origin_0,...,origin_N,size_0,...,size_N (source dimension order). Usually 3 dims (z,y,x), e.g. 0,0,0,512,512,512 -- but can cover more dims for a source with extra non-spatial axes (e.g. a 5D source with t,c included), paired with Bbox Axes below."
+            description: "Applied to every file in the directory. Extract a subvolume: origin_0,...,origin_N,size_0,...,size_N (source dimension order). Usually 3 dims (z,y,x), e.g. 0,0,0,512,512,512 -- but can cover more dims for a source with extra non-spatial axes (e.g. a 5D source with t,c included), paired with Bbox Axes below."
 
           - flag: --bbox_axes
             name: Bbox Axes
@@ -262,43 +276,6 @@ runnables:
             type: boolean
             description: "Drop any size-1 non-spatial axis (t/c/channel) from the output before writing, e.g. a source with t=1,c=1 becomes a plain 3D output. Requires axis identity to be known."
             default: false
-
-      - section: Label Ingestion
-        description: >
-          Add an annotation layer into an existing OME-NGFF zarr's labels/ folder.
-          Use with --add-to-existing and --is-label (or --data-type labels).
-          --output-offset embeds a sparse annotation (e.g. single timepoint crop) at the
-          correct TCZYX position; omit for same-shape ingest.
-        collapsed: true
-        parameters:
-          - flag: --add-to-existing
-            name: Add to Existing Container
-            type: boolean
-            description: "Write into an existing zarr without destroying it. Required for label ingestion."
-            default: false
-
-          - flag: --label-key
-            name: Label Name
-            type: string
-            description: "Name for the new label layer under labels/ (e.g. 'proofread_t10')."
-            default: segmentation
-
-          - flag: --output-offset
-            name: Output Offset (TCZYX)
-            type: string
-            description: >
-              Space-separated TCZYX integers giving the position in the target container where the
-              source origin lands. Fewer values are zero-padded on the left.
-              E.g. '10 0 0 151 870' → T=10, Y=151, X=870.
-              E.g. '10' → T=10, C=Z=Y=X=0 (full-volume single timepoint).
-              Omit entirely for same-shape ingest (existing --add-to-existing handles it).
-
-          - flag: --target-shape
-            name: Target Shape (TCZYX)
-            type: string
-            description: >
-              Full output array shape as space-separated TCZYX integers.
-              Auto-inferred from sibling labels in the target container if omitted.
 
       - section: Format-Specific
         description: "Options for specific input formats."
